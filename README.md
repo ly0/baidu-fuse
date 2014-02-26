@@ -2,7 +2,7 @@ baidu-fuse
 ==========
 
 ```Shell
-mkdir ./mnt <br />
+mkdir ./mnt 
 python baidufuse.py USERNAME PASSWORD mnt
 ```
 
