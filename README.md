@@ -14,4 +14,6 @@ python baidufuse.py USERNAME PASSWORD mnt
 基于百度网盘的一个fuse，实验性项目
 
 实现列表 
-* 文件列表w
+* 文件列表
+* 基本的文件上传下载
+* 重命名

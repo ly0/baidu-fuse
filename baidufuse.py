@@ -17,8 +17,9 @@ from fuse import FUSE, FuseOSError, Operations
 from baidupcsapi import PCS
 import logging
 import tempfile
+from hashlib import md5
+import progressbar
 
-baidu_rootdir = '/'
 logger = logging.getLogger("BaiduFS")
 formatter = logging.Formatter(
     '%(name)-12s %(asctime)s %(levelname)-8s %(message)s',
@@ -26,14 +27,33 @@ formatter = logging.Formatter(
 #file_handler = logging.Handler(level=0)
 #file_handler.setFormatter(formatter)
 #logger.addHandler(file_handler)
+'''
 logging.basicConfig(level=logging.DEBUG,
                 format='%(asctime)s %(filename)s[line:%(lineno)d] %(levelname)s %(message)s',
                 datefmt='%a, %d %b %Y %H:%M:%S')
+
+
+sign = 0
+'''
 class NoSuchRowException(Exception):
     pass
 
 class NoUniqueValueException(Exception):
     pass
+class ProgressBar():
+    def __init__(self):
+        self.first_call = True
+    def __call__(self, *args, **kwargs):
+        if self.first_call:
+            self.widgets = [progressbar.Percentage(), ' ', progressbar.Bar(marker=progressbar.RotatingMarker('>')),
+                            ' ', progressbar.FileTransferSpeed()]
+            self.pbar = progressbar.ProgressBar(widgets=self.widgets, maxval=kwargs['size']).start()
+            self.first_call = False
+
+        if kwargs['size'] <= kwargs['progress']:
+            self.pbar.finish()
+        else:
+            self.pbar.update(kwargs['progress'])
 
 class File():
     def __init__(self):
@@ -61,6 +81,7 @@ class File():
     def getDict(self):
         return self.dict
 
+
 class BaiduFS(Operations):
     '''Baidu netdisk filesystem'''
 
@@ -69,7 +90,10 @@ class BaiduFS(Operations):
         self.buffer = {}
         self.traversed_folder = {}
         self.bufferLock = Lock()
+        self.upload_blocks = {} # 文件上传时用于记录块的md5,{PATH:{TMP:'',BLOCKS:''}
+        self.create_tmp = {} # {goutputstrem_path:file}
         self.fd = 3
+
 
     def _add_file_to_buffer(self, path,file_info):
         foo = File()
@@ -89,7 +113,7 @@ class BaiduFS(Operations):
         # 先看缓存中是否存在该文件
 
         if not self.buffer.has_key(path):
-            print path,'未命中'
+            #print path,'未命中'
             #print self.buffer
             #print self.traversed_folder
             jdata = json.loads(self.disk.meta([path]).content)
@@ -105,7 +129,7 @@ class BaiduFS(Operations):
             except:
                 raise FuseOSError(errno.ENOENT)
         else:
-            print path,'命中'
+            #print path,'命中'
             return self.buffer[path].getDict()
 
 
@@ -137,12 +161,22 @@ class BaiduFS(Operations):
         for r in files:
             yield r
 
+    def _update_file_manual(self,path):
+        jdata = json.loads(self.disk.meta([path]).content)
+        if 'info' not in jdata:
+            raise FuseOSError(errno.ENOENT)
+        if jdata['errno'] != 0:
+            raise FuseOSError(errno.ENOENT)
+        file_info = jdata['info'][0]
+        self._add_file_to_buffer(path,file_info)
+
+
     def rename(self, old, new):
-        print '* rename',old,os.path.basename(new)
+        #logging.debug('* rename',old,os.path.basename(new))
         print self.disk.rename([(old,os.path.basename(new))]).content
 
     def open(self, path, flags):
-        print '[****]',path
+        #print '[****]',path
         """
         Permission denied
 
@@ -154,25 +188,100 @@ class BaiduFS(Operations):
         return self.fd
 
     def create(self, path, mode,fh=None):
-        # 创建临时文件
-        # 中文有问题
-        tmp_file = tempfile.TemporaryFile('r+b')
-        foo = self.disk.upload(os.path.dirname(path),tmp_file,os.path.basename(path)).content
-        ret = json.loads(foo)
-        print ret
-        if ret['path'] != path:
-            # 文件已存在
-            raise FuseOSError(errno.EEXIST)
+        # 创建文件
+        # 中文路径有问题
+        if 'outputstream' not in path:
+            tmp_file = tempfile.TemporaryFile('r+w+b')
+            foo = self.disk.upload(os.path.dirname(path),tmp_file,os.path.basename(path)).content
+            ret = json.loads(foo)
+            print 'create-not-outputstream',ret
+            if ret['path'] != path:
+                # 文件已存在
+                raise FuseOSError(errno.EEXIST)
+        else:
+            print 'creat:',path
+            foo = File()
+            foo['st_ctime'] = int(time.time())
+            foo['st_mtime'] = int(time.time())
+            foo['st_mode'] = (stat.S_IFREG | 0777)
+            foo['st_nlink'] = 1
+            foo['st_size'] = 0
+            self.buffer[path] = foo
 
+        '''
         dict(st_mode=(stat.S_IFREG | mode), st_nlink=1,
                                 st_size=0, st_ctime=time.time(), st_mtime=time.time(),
                                 st_atime=time.time())
-
+        '''
         self.fd += 1
         return self.fd
 
-    def write(self, path, data, offset, fh):
-        print '*'*10,path,data,offset,fh
+    def write(self, path, data, offset, fp):
+        # 上传文件时会调用
+        # 4kb ( 4096 bytes ) 每块，data中是块中的数据
+        # 最后一块的判断：len(data) < 4096
+        # 文件大小 = 最后一块的offset + len(data)
+
+        # 4kb传太慢了，合计成2M传一次
+
+        #print '*'*10,path,offset, len(data)
+        def _block_size(stream):
+            stream.seek(0,2)
+            return stream.tell()
+
+        _BLOCK_SIZE = 2 ** 20
+        # 第一块的任务
+        if offset == 0:
+            # 初始化块md5列表
+            self.upload_blocks[path] = {'tmp':None,
+                                        'blocks':[]}
+            # 创建缓冲区临时文件
+            tmp_file = tempfile.TemporaryFile('r+w+b')
+            self.upload_blocks[path]['tmp'] = tmp_file
+
+        # 向临时文件写入数据，检查是否>= _BLOCK_SIZE 是则上传该块并将临时文件清空
+        tmp = self.upload_blocks[path]['tmp']
+        tmp.write(data)
+
+        if _block_size(tmp) > _BLOCK_SIZE:
+            print path,'发生上传'
+            tmp.seek(0)
+            foo = self.disk.upload_tmpfile(tmp).content
+            foofoo = json.loads(foo)
+            block_md5 = foofoo['md5']
+            # 在 upload_blocks 中插入本块的 md5
+            self.upload_blocks[path]['blocks'].append(block_md5)
+            # 创建缓冲区临时文件
+            self.upload_blocks[path]['tmp'].close()
+            tmp_file = tempfile.TemporaryFile('r+w+b')
+            self.upload_blocks[path]['tmp'] = tmp_file
+
+        # 最后一块的任务
+        if len(data) < 4096:
+            # 检查是否有重名，有重名则删除它
+            foo = self.disk.meta([path]).content
+            foofoo = json.loads(foo)
+            if foofoo['errno'] == 0:
+                logging.debug('Deleted the file which has same name.')
+                self.disk.delete([path])
+            # 看看是否需要上传
+            if _block_size(tmp) != 0:
+                # 此时临时文件有数据，需要上传
+                print path,'发生上传,块末尾,文件大小',_block_size(tmp)
+                tmp.seek(0)
+                foo = self.disk.upload_tmpfile(tmp,callback=ProgressBar()).content
+                foofoo = json.loads(foo)
+                block_md5 = foofoo['md5']
+                # 在 upload_blocks 中插入本块的 md5
+                self.upload_blocks[path]['blocks'].append(block_md5)
+
+            # 调用 upload_superfile 以合并块文件
+            logging.debug('合并文件')
+            self.disk.upload_superfile(path,self.upload_blocks[path]['blocks'])
+            # 删除upload_blocks中数据
+            self.upload_blocks.pop(path)
+            # 更新本地文件列表缓存
+            self._update_file_manual(path)
         return len(data)
 
 
@@ -187,7 +296,7 @@ class BaiduFS(Operations):
     def read(self, path, size, offset, fh):
         logger.debug("read is: " + path)
         paras = {'Range': 'bytes=%s-%s' % (offset, offset + size - 1)}
-        return self.disk.download(path, headers=paras).content
+        return self.disk.download(path, headers=paras, callback=ProgressBar()).content
 
     access = None
     statfs = None
