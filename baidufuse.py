@@ -12,9 +12,11 @@ try:
 except ImportError:
     pass
 import json
+import time
 from fuse import FUSE, FuseOSError, Operations
 from baidupcsapi import PCS
 import logging
+import tempfile
 
 baidu_rootdir = '/'
 logger = logging.getLogger("BaiduFS")
@@ -24,7 +26,9 @@ formatter = logging.Formatter(
 #file_handler = logging.Handler(level=0)
 #file_handler.setFormatter(formatter)
 #logger.addHandler(file_handler)
-
+logging.basicConfig(level=logging.DEBUG,
+                format='%(asctime)s %(filename)s[line:%(lineno)d] %(levelname)s %(message)s',
+                datefmt='%a, %d %b %Y %H:%M:%S')
 class NoSuchRowException(Exception):
     pass
 
@@ -65,6 +69,7 @@ class BaiduFS(Operations):
         self.buffer = {}
         self.traversed_folder = {}
         self.bufferLock = Lock()
+        self.fd = 3
 
     def _add_file_to_buffer(self, path,file_info):
         foo = File()
@@ -132,29 +137,57 @@ class BaiduFS(Operations):
         for r in files:
             yield r
 
+    def rename(self, old, new):
+        print '* rename',old,os.path.basename(new)
+        print self.disk.rename([(old,os.path.basename(new))]).content
+
     def open(self, path, flags):
-        logger.error("open is: " + path)
-        pass
+        print '[****]',path
+        """
+        Permission denied
+
         accmode = os.O_RDONLY | os.O_WRONLY | os.O_RDWR
         if (flags & accmode) != os.O_RDONLY:
-            return FuseOSError(errno.EACCES)
+            raise FuseOSError(errno.EACCES)
+        """
+        self.fd += 1
+        return self.fd
+
+    def create(self, path, mode,fh=None):
+        # 创建临时文件
+        # 中文有问题
+        tmp_file = tempfile.TemporaryFile('r+b')
+        foo = self.disk.upload(os.path.dirname(path),tmp_file,os.path.basename(path)).content
+        ret = json.loads(foo)
+        print ret
+        if ret['path'] != path:
+            # 文件已存在
+            raise FuseOSError(errno.EEXIST)
+
+        dict(st_mode=(stat.S_IFREG | mode), st_nlink=1,
+                                st_size=0, st_ctime=time.time(), st_mtime=time.time(),
+                                st_atime=time.time())
+
+        self.fd += 1
+        return self.fd
+
+    def write(self, path, data, offset, fh):
+        print '*'*10,path,data,offset,fh
+        return len(data)
 
 
     def mkdir(self, path, mode):
         logger.debug("mkdir is:" + path)
-        abs_path = self.get_abs_path(path)
-        self.disk.mkdir(abs_path)
+        self.disk.mkdir(path)
 
     def rmdir(self, path):
         logger.debug("rmdir is:" + path)
-        abs_path = self.get_abs_path(path)
-        self.disk.delete(abs_path)
+        self.disk.delete(path)
 
-    def read(self, path, size, offset):
+    def read(self, path, size, offset, fh):
         logger.debug("read is: " + path)
-        abs_path = self.get_abs_path(path)
-        paras = {'Range': 'bytes=%s-%s' % (offset, offset + size)}
-        return self.disk.download(abs_path, paras).content
+        paras = {'Range': 'bytes=%s-%s' % (offset, offset + size - 1)}
+        return self.disk.download(path, headers=paras).content
 
     access = None
     statfs = None
