@@ -1,6 +1,11 @@
 baidu-fuse
 ==========
 
+###### 需要的库
+baidupcsapi: https://github.com/ly0/baidupcsapi
+
+fusepy: https://github.com/terencehonles/fusepy
+
 ```Shell
 mkdir ./mnt 
 python baidufuse.py USERNAME PASSWORD mnt
