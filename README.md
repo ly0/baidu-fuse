@@ -11,6 +11,8 @@ mkdir ./mnt
 python baidufuse.py USERNAME PASSWORD mnt
 ```
 
+*强烈建议在CLI下访问挂载点，用GUI下的文件浏览器会请求每个文件的首部，在文件数目多的时候会造成速度过慢*
+
 基于百度网盘的一个fuse，实验性项目
 
 实现列表 

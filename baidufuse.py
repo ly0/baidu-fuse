@@ -103,7 +103,7 @@ class BaiduFS(Operations):
         self.uploadLock = Lock() # 上传文件时不刷新目录
         self.readLock = Lock()
         self.downloading_files = []
-
+        
     def unlink(self, path):
         print '*'*10,'UNLINK CALLED',path
         self.disk.delete([path])
@@ -213,6 +213,7 @@ class BaiduFS(Operations):
         """
         self.fd += 1
         self.readLock.release()
+        
         return self.fd
 
     def create(self, path, mode,fh=None):
