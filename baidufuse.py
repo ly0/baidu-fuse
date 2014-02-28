@@ -17,23 +17,18 @@ from fuse import FUSE, FuseOSError, Operations
 from baidupcsapi import PCS
 import logging
 import tempfile
-from hashlib import md5
 import progressbar
 
 logger = logging.getLogger("BaiduFS")
 formatter = logging.Formatter(
     '%(name)-12s %(asctime)s %(levelname)-8s %(message)s',
     '%a, %d %b %Y %H:%M:%S')
-#file_handler = logging.Handler(level=0)
-#file_handler.setFormatter(formatter)
-#logger.addHandler(file_handler)
+
 '''
 logging.basicConfig(level=logging.DEBUG,
                 format='%(asctime)s %(filename)s[line:%(lineno)d] %(levelname)s %(message)s',
                 datefmt='%a, %d %b %Y %H:%M:%S')
 
-
-sign = 0
 '''
 class NoSuchRowException(Exception):
     pass
@@ -93,6 +88,25 @@ class BaiduFS(Operations):
         self.upload_blocks = {} # 文件上传时用于记录块的md5,{PATH:{TMP:'',BLOCKS:''}
         self.create_tmp = {} # {goutputstrem_path:file}
         self.fd = 3
+        # 初始化百度服务器
+        print '设置pcs服务器'
+        pcs = self.disk.get_fastest_pcs_server()
+        self.disk.set_pcs_server(pcs)
+        print 'pcs api server:',pcs
+        '''
+        print '设置百度网盘服务器,时间比较长,请耐心等待'
+        pan = self.disk.get_fastest_mirror()
+        self.disk.set_pan_server(pan)
+        print 'baidupan server',pan
+        '''
+
+        self.uploadLock = Lock() # 上传文件时不刷新目录
+        self.readLock = Lock()
+        self.downloading_files = []
+
+    def unlink(self, path):
+        print '*'*10,'UNLINK CALLED',path
+        self.disk.delete([path])
 
 
     def _add_file_to_buffer(self, path,file_info):
@@ -113,7 +127,7 @@ class BaiduFS(Operations):
         # 先看缓存中是否存在该文件
 
         if not self.buffer.has_key(path):
-            #print path,'未命中'
+            print path,'未命中'
             #print self.buffer
             #print self.traversed_folder
             jdata = json.loads(self.disk.meta([path]).content)
@@ -135,6 +149,7 @@ class BaiduFS(Operations):
 
 
     def readdir(self, path, offset):
+        self.uploadLock.acquire()
         foo = json.loads(self.disk.list_files(path).text)
         files = ['.', '..']
         abs_files = [] # 该文件夹下文件的绝对路径
@@ -160,6 +175,7 @@ class BaiduFS(Operations):
             self.traversed_folder[path] = True
         for r in files:
             yield r
+        self.uploadLock.release()
 
     def _update_file_manual(self,path):
         jdata = json.loads(self.disk.meta([path]).content)
@@ -173,9 +189,20 @@ class BaiduFS(Operations):
 
     def rename(self, old, new):
         #logging.debug('* rename',old,os.path.basename(new))
-        print self.disk.rename([(old,os.path.basename(new))]).content
+        print '*'*10,'RENAME CALLED',old,os.path.basename(new),type(old),type(new)
+        ret = self.disk.rename([(old,os.path.basename(new))]).content
+        jdata = json.loads(ret)
+        if jdata['errno'] != 0:
+            # 文件名已存在,删除原文件
+            print self.disk.delete([new]).content
+            print self.disk.rename([(old,os.path.basename(new))])
+        self._update_file_manual(new)
+        self.buffer.pop(old)
+
 
     def open(self, path, flags):
+        self.readLock.acquire()
+        print '*'*10,'OPEN CALLED',path,flags
         #print '[****]',path
         """
         Permission denied
@@ -185,11 +212,13 @@ class BaiduFS(Operations):
             raise FuseOSError(errno.EACCES)
         """
         self.fd += 1
+        self.readLock.release()
         return self.fd
 
     def create(self, path, mode,fh=None):
         # 创建文件
         # 中文路径有问题
+        print '*'*10,'CREATE CALLED',path,mode,type(path)
         if 'outputstream' not in path:
             tmp_file = tempfile.TemporaryFile('r+w+b')
             foo = self.disk.upload(os.path.dirname(path),tmp_file,os.path.basename(path)).content
@@ -199,7 +228,7 @@ class BaiduFS(Operations):
                 # 文件已存在
                 raise FuseOSError(errno.EEXIST)
         else:
-            print 'creat:',path
+            print 'create:',path
             foo = File()
             foo['st_ctime'] = int(time.time())
             foo['st_mtime'] = int(time.time())
@@ -208,13 +237,14 @@ class BaiduFS(Operations):
             foo['st_size'] = 0
             self.buffer[path] = foo
 
+
         '''
         dict(st_mode=(stat.S_IFREG | mode), st_nlink=1,
                                 st_size=0, st_ctime=time.time(), st_mtime=time.time(),
                                 st_atime=time.time())
         '''
         self.fd += 1
-        return self.fd
+        return 0
 
     def write(self, path, data, offset, fp):
         # 上传文件时会调用
@@ -229,9 +259,11 @@ class BaiduFS(Operations):
             stream.seek(0,2)
             return stream.tell()
 
-        _BLOCK_SIZE = 2 ** 20
+        _BLOCK_SIZE = 4 * 2 ** 20
         # 第一块的任务
         if offset == 0:
+            self.uploadLock.acquire()
+            self.readLock.acquire()
             # 初始化块md5列表
             self.upload_blocks[path] = {'tmp':None,
                                         'blocks':[]}
@@ -246,7 +278,7 @@ class BaiduFS(Operations):
         if _block_size(tmp) > _BLOCK_SIZE:
             print path,'发生上传'
             tmp.seek(0)
-            foo = self.disk.upload_tmpfile(tmp).content
+            foo = self.disk.upload_tmpfile(tmp,callback=ProgressBar()).content
             foofoo = json.loads(foo)
             block_md5 = foofoo['md5']
             # 在 upload_blocks 中插入本块的 md5
@@ -255,6 +287,7 @@ class BaiduFS(Operations):
             self.upload_blocks[path]['tmp'].close()
             tmp_file = tempfile.TemporaryFile('r+w+b')
             self.upload_blocks[path]['tmp'] = tmp_file
+            print '创建临时文件',tmp_file.name
 
         # 最后一块的任务
         if len(data) < 4096:
@@ -276,12 +309,14 @@ class BaiduFS(Operations):
                 self.upload_blocks[path]['blocks'].append(block_md5)
 
             # 调用 upload_superfile 以合并块文件
-            logging.debug('合并文件')
+            print '合并文件',path
             self.disk.upload_superfile(path,self.upload_blocks[path]['blocks'])
             # 删除upload_blocks中数据
             self.upload_blocks.pop(path)
             # 更新本地文件列表缓存
             self._update_file_manual(path)
+            self.readLock.release()
+            self.uploadLock.release()
         return len(data)
 
 
@@ -294,6 +329,7 @@ class BaiduFS(Operations):
         self.disk.delete(path)
 
     def read(self, path, size, offset, fh):
+        print '*'*10,'READ CALLED',path,size,offset
         logger.debug("read is: " + path)
         paras = {'Range': 'bytes=%s-%s' % (offset, offset + size - 1)}
         return self.disk.download(path, headers=paras, callback=ProgressBar()).content
