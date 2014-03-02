@@ -254,6 +254,7 @@ class BaiduFS(Operations):
             print 'create-not-outputstream',ret
             if ret['path'] != path:
                 # 文件已存在
+                print '文件已存在'
                 raise FuseOSError(errno.EEXIST)
         else:
             print 'create:',path
@@ -282,7 +283,7 @@ class BaiduFS(Operations):
 
         # 4kb传太慢了，合计成2M传一次
 
-        print '*'*10,path,offset, len(data)
+        #print '*'*10,path,offset, len(data)
 
         def _block_size(stream):
             stream.seek(0,2)
