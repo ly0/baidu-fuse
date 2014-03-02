@@ -19,6 +19,7 @@ import logging
 import tempfile
 import progressbar
 
+
 logger = logging.getLogger("BaiduFS")
 formatter = logging.Formatter(
     '%(name)-12s %(asctime)s %(levelname)-8s %(message)s',
@@ -113,8 +114,8 @@ class BaiduFS(Operations):
         foo = File()
         foo['st_ctime'] = file_info['local_ctime']
         foo['st_mtime'] = file_info['local_mtime']
-        foo['st_mode'] = (stat.S_IFDIR | 0666) if file_info['isdir'] \
-            else (stat.S_IFREG | 0666)
+        foo['st_mode'] = (stat.S_IFDIR | 0777) if file_info['isdir'] \
+            else (stat.S_IFREG | 0777)
         foo['st_nlink'] = 2 if file_info['isdir'] else 1
         foo['st_size'] = file_info['size']
         self.buffer[path] = foo
@@ -150,7 +151,14 @@ class BaiduFS(Operations):
 
     def readdir(self, path, offset):
         self.uploadLock.acquire()
-        foo = json.loads(self.disk.list_files(path).text)
+        while True:
+            try:
+                foo = json.loads(self.disk.list_files(path).text)
+                break
+            except:
+                print 'error'
+
+
         files = ['.', '..']
         abs_files = [] # 该文件夹下文件的绝对路径
         for file in foo['list']:
@@ -166,7 +174,13 @@ class BaiduFS(Operations):
             group = int(math.ceil(file_num / 100.0))
             for i in range(group):
                 obj = [f for n,f in enumerate(abs_files) if n % group == i] #一组数据
-                ret = json.loads(self.disk.meta(obj).text)
+                while 1:
+                    try:
+                        ret = json.loads(self.disk.meta(obj).text)
+                        break
+                    except:
+                        print 'error'
+
                 for file_info in ret['info']:
                     if not self.buffer.has_key(file_info['path']):
                         self._add_file_to_buffer(file_info['path'],file_info)
@@ -178,7 +192,13 @@ class BaiduFS(Operations):
         self.uploadLock.release()
 
     def _update_file_manual(self,path):
-        jdata = json.loads(self.disk.meta([path]).content)
+        while 1:
+            try:
+                jdata = json.loads(self.disk.meta([path]).content)
+                break
+            except:
+                print 'error'
+
         if 'info' not in jdata:
             raise FuseOSError(errno.ENOENT)
         if jdata['errno'] != 0:
@@ -190,8 +210,14 @@ class BaiduFS(Operations):
     def rename(self, old, new):
         #logging.debug('* rename',old,os.path.basename(new))
         print '*'*10,'RENAME CALLED',old,os.path.basename(new),type(old),type(new)
-        ret = self.disk.rename([(old,os.path.basename(new))]).content
-        jdata = json.loads(ret)
+        while True:
+            try:
+                ret = self.disk.rename([(old,os.path.basename(new))]).content
+                jdata = json.loads(ret)
+                break
+            except:
+                print 'error'
+
         if jdata['errno'] != 0:
             # 文件名已存在,删除原文件
             print self.disk.delete([new]).content
@@ -224,6 +250,7 @@ class BaiduFS(Operations):
             tmp_file = tempfile.TemporaryFile('r+w+b')
             foo = self.disk.upload(os.path.dirname(path),tmp_file,os.path.basename(path)).content
             ret = json.loads(foo)
+            print ret
             print 'create-not-outputstream',ret
             if ret['path'] != path:
                 # 文件已存在
@@ -255,7 +282,8 @@ class BaiduFS(Operations):
 
         # 4kb传太慢了，合计成2M传一次
 
-        #print '*'*10,path,offset, len(data)
+        print '*'*10,path,offset, len(data)
+
         def _block_size(stream):
             stream.seek(0,2)
             return stream.tell()
@@ -273,15 +301,24 @@ class BaiduFS(Operations):
             self.upload_blocks[path]['tmp'] = tmp_file
 
         # 向临时文件写入数据，检查是否>= _BLOCK_SIZE 是则上传该块并将临时文件清空
-        tmp = self.upload_blocks[path]['tmp']
+        try:
+            tmp = self.upload_blocks[path]['tmp']
+        except KeyError:
+            return 0
         tmp.write(data)
 
         if _block_size(tmp) > _BLOCK_SIZE:
             print path,'发生上传'
             tmp.seek(0)
-            foo = self.disk.upload_tmpfile(tmp,callback=ProgressBar()).content
-            foofoo = json.loads(foo)
-            block_md5 = foofoo['md5']
+            while True:
+                try:
+                    foo = self.disk.upload_tmpfile(tmp,callback=ProgressBar()).content
+                    foofoo = json.loads(foo)
+                    block_md5 = foofoo['md5']
+                    break
+                except:
+                    print 'error'
+
             # 在 upload_blocks 中插入本块的 md5
             self.upload_blocks[path]['blocks'].append(block_md5)
             # 创建缓冲区临时文件
@@ -293,8 +330,15 @@ class BaiduFS(Operations):
         # 最后一块的任务
         if len(data) < 4096:
             # 检查是否有重名，有重名则删除它
-            foo = self.disk.meta([path]).content
-            foofoo = json.loads(foo)
+            while True:
+                try:
+                    foo = self.disk.meta([path]).content
+                    foofoo = json.loads(foo)
+                    break
+                except:
+                    print 'error'
+
+
             if foofoo['errno'] == 0:
                 logging.debug('Deleted the file which has same name.')
                 self.disk.delete([path])
@@ -303,14 +347,20 @@ class BaiduFS(Operations):
                 # 此时临时文件有数据，需要上传
                 print path,'发生上传,块末尾,文件大小',_block_size(tmp)
                 tmp.seek(0)
-                foo = self.disk.upload_tmpfile(tmp,callback=ProgressBar()).content
-                foofoo = json.loads(foo)
+                while True:
+                    try:
+                        foo = self.disk.upload_tmpfile(tmp,callback=ProgressBar()).content
+                        foofoo = json.loads(foo)
+                        break
+                    except:
+                        print 'exception, retry.'
+
                 block_md5 = foofoo['md5']
                 # 在 upload_blocks 中插入本块的 md5
                 self.upload_blocks[path]['blocks'].append(block_md5)
 
             # 调用 upload_superfile 以合并块文件
-            print '合并文件',path
+            print '合并文件',path,type(path)
             self.disk.upload_superfile(path,self.upload_blocks[path]['blocks'])
             # 删除upload_blocks中数据
             self.upload_blocks.pop(path)
@@ -327,7 +377,7 @@ class BaiduFS(Operations):
 
     def rmdir(self, path):
         logger.debug("rmdir is:" + path)
-        self.disk.delete(path)
+        self.disk.delete([path])
 
     def read(self, path, size, offset, fh):
         print '*'*10,'READ CALLED',path,size,offset
