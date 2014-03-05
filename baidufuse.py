@@ -88,6 +88,7 @@ class BaiduFS(Operations):
         self.bufferLock = Lock()
         self.upload_blocks = {} # 文件上传时用于记录块的md5,{PATH:{TMP:'',BLOCKS:''}
         self.create_tmp = {} # {goutputstrem_path:file}
+        self.upload_fails = {} #
         self.fd = 3
         # 初始化百度服务器
         print '设置pcs服务器'
@@ -246,16 +247,17 @@ class BaiduFS(Operations):
         # 创建文件
         # 中文路径有问题
         print '*'*10,'CREATE CALLED',path,mode,type(path)
-        if 'outputstream' not in path:
-            tmp_file = tempfile.TemporaryFile('r+w+b')
-            foo = self.disk.upload(os.path.dirname(path),tmp_file,os.path.basename(path)).content
-            ret = json.loads(foo)
-            print ret
-            print 'create-not-outputstream',ret
-            if ret['path'] != path:
-                # 文件已存在
-                print '文件已存在'
-                raise FuseOSError(errno.EEXIST)
+        #if 'outputstream' not in path:
+        tmp_file = tempfile.TemporaryFile('r+w+b')
+        foo = self.disk.upload(os.path.dirname(path),tmp_file,os.path.basename(path)).content
+        ret = json.loads(foo)
+        print ret
+        print 'create-not-outputstream',ret
+        if ret['path'] != path:
+            # 文件已存在
+            print '文件已存在'
+            raise FuseOSError(errno.EEXIST)
+        '''
         else:
             print 'create:',path
             foo = File()
@@ -265,6 +267,7 @@ class BaiduFS(Operations):
             foo['st_nlink'] = 1
             foo['st_size'] = 0
             self.buffer[path] = foo
+        '''
 
 
         '''
@@ -289,11 +292,11 @@ class BaiduFS(Operations):
             stream.seek(0,2)
             return stream.tell()
 
-        _BLOCK_SIZE = 4 * 2 ** 20
+        _BLOCK_SIZE = 16 * 2 ** 20
         # 第一块的任务
         if offset == 0:
-            self.uploadLock.acquire()
-            self.readLock.acquire()
+            #self.uploadLock.acquire()
+            #self.readLock.acquire()
             # 初始化块md5列表
             self.upload_blocks[path] = {'tmp':None,
                                         'blocks':[]}
@@ -311,14 +314,14 @@ class BaiduFS(Operations):
         if _block_size(tmp) > _BLOCK_SIZE:
             print path,'发生上传'
             tmp.seek(0)
-            while True:
-                try:
-                    foo = self.disk.upload_tmpfile(tmp,callback=ProgressBar()).content
-                    foofoo = json.loads(foo)
-                    block_md5 = foofoo['md5']
-                    break
-                except:
-                    print 'error'
+            try:
+                foo = self.disk.upload_tmpfile(tmp,callback=ProgressBar()).content
+                foofoo = json.loads(foo)
+                block_md5 = foofoo['md5']
+            except:
+                 print foo
+
+
 
             # 在 upload_blocks 中插入本块的 md5
             self.upload_blocks[path]['blocks'].append(block_md5)
@@ -367,8 +370,8 @@ class BaiduFS(Operations):
             self.upload_blocks.pop(path)
             # 更新本地文件列表缓存
             self._update_file_manual(path)
-            self.readLock.release()
-            self.uploadLock.release()
+            #self.readLock.release()
+            #self.uploadLock.release()
         return len(data)
 
 
@@ -381,16 +384,16 @@ class BaiduFS(Operations):
         self.disk.delete([path])
 
     def read(self, path, size, offset, fh):
-        print '*'*10,'READ CALLED',path,size,offset
-        logger.debug("read is: " + path)
+        #print '*'*10,'READ CALLED',path,size,offset
+        #logger.debug("read is: " + path)
         paras = {'Range': 'bytes=%s-%s' % (offset, offset + size - 1)}
-        return self.disk.download(path, headers=paras, callback=ProgressBar()).content
+        return self.disk.download(path, headers=paras).content
 
     access = None
     statfs = None
 
 if __name__ == '__main__':
     if len(sys.argv) != 4:
-		print 'Usage {0} username password mountpoint'.format(sys.argv[0])
-		sys.exit(0)
+        print 'Usage {0} username password mountpoint'.format(sys.argv[0])
+        sys.exit(0)
     FUSE(BaiduFS(sys.argv[1],sys.argv[2]),sys.argv[3],foreground=True, nonempty=True)

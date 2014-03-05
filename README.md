@@ -2,9 +2,14 @@ baidu-fuse
 ==========
 
 ###### 需要的库
+fuse (http://fuse.sourceforge.net)
+
 baidupcsapi: https://github.com/ly0/baidupcsapi
 
 fusepy: https://github.com/terencehonles/fusepy
+
+建议将 fuse 的 FUSE_MIN_READ_BUFFER 改成 131072 (内核似乎最大支持128k)
+可以提高下载速度
 
 ```Shell
 mkdir ./mnt 
