@@ -387,7 +387,12 @@ class BaiduFS(Operations):
         #print '*'*10,'READ CALLED',path,size,offset
         #logger.debug("read is: " + path)
         paras = {'Range': 'bytes=%s-%s' % (offset, offset + size - 1)}
-        return self.disk.download(path, headers=paras).content
+        while True:
+            try:
+                foo = self.disk.download(path, headers=paras).content
+                return foo
+            except:
+                pass
 
     access = None
     statfs = None
