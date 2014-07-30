@@ -1,6 +1,9 @@
 baidu-fuse
 ==========
 
+## 随时更新
+* *baidufuse2.py* 使用 *axel* 作下载器, 目前在图形界面下浏览会很糟糕 (图形界面如果尝试读取预览图的话).
+
 ###### 需要的库
 fuse (http://fuse.sourceforge.net)
 
